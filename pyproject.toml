@@ -1,0 +1,19 @@
+[project]
+name = "nn_algotrading"
+version = "0.1.0"
+authors = [
+    { name = "Sergey Yakunin", email = "ciellol@yandex.ru" }
+]
+description = "A library for neural network based algorithmic trading"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "pandas",
+    "torch"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

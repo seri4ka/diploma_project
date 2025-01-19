@@ -309,3 +309,4 @@ class DynamicPortfolioLoss(nn.Module):
         loss = -mean_weighted_return / turnover_penalty / turnover_value
         
         return loss, mean_weighted_return.item(), turnover_penalty.item()
+  
