@@ -3,8 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 
-import torch.nn as nn
-
 class LSTMModel(nn.Module):
     """
     LSTM model consisting of two LSTM layers followed by a fully connected layer.
@@ -190,9 +188,6 @@ class LSTMWithAttentionAlt(nn.Module):
         return out
 
 
-import torch
-import torch.nn as nn
-
 class ConvLSTMWithAttention(nn.Module):
     """
     Convolutional LSTM model with attention mechanism and various normalizations.
@@ -228,13 +223,16 @@ class ConvLSTMWithAttention(nn.Module):
         self.lstm_layer_norm = nn.LayerNorm(hidden_size)  # Layer normalization after lstm1
         self.lstm2 = nn.LSTM(hidden_size, hidden_size2, batch_first=True, dropout=dropout)
         
+        # Linear layer for residual connection projection
+        self.residual_projection = nn.Linear(hidden_size2, hidden_size)
+
         # Attention layer
-        self.attention = nn.MultiheadAttention(hidden_size2, num_heads=num_heads, batch_first=True)
+        self.attention = nn.MultiheadAttention(hidden_size, num_heads=num_heads, batch_first=True)
         
         # Fully connected layer and additional layers
-        self.fc = nn.Linear(hidden_size2, output_size)
+        self.fc = nn.Linear(hidden_size, output_size)
         self.dropout = nn.Dropout(p=dropout2)
-        self.layer_norm = nn.LayerNorm(hidden_size2)
+        self.layer_norm = nn.LayerNorm(hidden_size)
         self.activation = nn.ReLU()
 
     def forward(self, x):
@@ -267,8 +265,9 @@ class ConvLSTMWithAttention(nn.Module):
         lstm_out1 = self.lstm_layer_norm(lstm_out1)  # Apply LayerNorm after lstm1
         lstm_out2, _ = self.lstm2(lstm_out1)
         
-        # Residual connection between LSTM layers
-        lstm_out2 = lstm_out1 + lstm_out2  # Residual connection
+        # Project lstm_out2 to match lstm_out1 dimensions for residual connection
+        lstm_out2_resized = self.residual_projection(lstm_out2)
+        lstm_out2 = lstm_out1 + lstm_out2_resized  # Residual connection
         
         # Apply Multihead Attention
         attn_out, _ = self.attention(lstm_out2, lstm_out2, lstm_out2)
@@ -287,3 +286,69 @@ class ConvLSTMWithAttention(nn.Module):
         
         return out
 
+class AttentionMLP(nn.Module):
+    """
+    Упрощенная модель, использующая механизм внимания и полносвязные слои (MLP).
+    """
+
+    def __init__(self, input_size, hidden_size, output_size, num_heads=4, dropout=0.1):
+        """
+        Инициализирует AttentionMLP модель.
+
+        Args:
+            input_size (int): Размер входных признаков.
+            hidden_size (int): Размер скрытых слоев.
+            output_size (int): Размер выходного слоя.
+            num_heads (int): Количество голов в слое внимания.
+            dropout (float): Вероятность дропаута.
+        """
+        super(AttentionMLP, self).__init__()
+        
+        # Attention layer
+        self.attention = nn.MultiheadAttention(embed_dim=input_size, num_heads=num_heads, batch_first=True)
+        
+        # Fully connected layers with normalization and dropout
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.layer_norm1 = nn.LayerNorm(hidden_size)
+        self.dropout1 = nn.Dropout(dropout)
+        
+        self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
+        self.layer_norm2 = nn.LayerNorm(hidden_size // 2)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        self.fc3 = nn.Linear(hidden_size // 2, output_size)
+
+        # Activation function
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        Forward проход через модель Attention + MLP.
+
+        Args:
+            x (torch.Tensor): Входной тензор формы (batch_size, seq_len, input_size).
+
+        Returns:
+            torch.Tensor: Выходной тензор после внимания и полносвязных слоев.
+        """
+        # Attention layer
+        attn_out, _ = self.attention(x, x, x)
+        
+        # Используем только последний временной шаг
+        attn_out = attn_out[:, -1, :]
+        
+        # Проход через полносвязные слои с нормализацией и dropout
+        x = self.fc1(attn_out)
+        x = self.layer_norm1(x)
+        x = self.activation(x)
+        x = self.dropout1(x)
+        
+        x = self.fc2(x)
+        x = self.layer_norm2(x)
+        x = self.activation(x)
+        x = self.dropout2(x)
+        
+        # Выходной слой
+        out = self.fc3(x)
+        
+        return out

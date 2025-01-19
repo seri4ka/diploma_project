@@ -1,0 +1,514 @@
+Перейдем к написанию основной части работы. Я опишу все, что потенциально нам может пригодиться, а ты выберешь наиболее важное
+и сформируешь некий черновик.
+
+Структура рабочего каталога имеет следующий вид:
+|-- _diploma - рабочий каталог
+  |-- data - папка с историческими данными различных источников
+    |-- binance - криптовалютная биржа бинанс
+      |-- fut - исторические данные по фьючерсам
+        |-- hour - разбивка по часам
+    |-- bybit - криптовалютная биржа байбит
+    |-- moex - московская биржа
+      |-- ten_minutes - разбивка по 10-минутным свечам
+    |-- tinkoff - брокер Тинькофф инвестиции, который так же предоставляет исторические данные
+      |-- day - разбивка по дням
+      |-- fiftteen_minutes - разбивка по 15-минутным свечам
+      |-- five_minutes - разбивка по 5-минутным свечам
+      |-- four_hour - разбивка по 4-часовым свечам
+      |-- halh_hour - разбивка по 30-минутным свечам
+      |-- hour - разбивка по часовым свечам
+      |-- minute - разбивка по минутным свечам
+  |-- models - обученные модели в PyTorch
+    |-- binance - на исторических данных бинанс
+      |-- 4hours - разбивка по 4-часовым свечам
+      |-- hour - разбивка по часовым свечам
+    |-- moex - на исторических данных мосбиржи
+  |-- modules - модули, вынесенные в отдельный каталог
+    |-- __pycache__ - кэш из jupyter
+     |-- loss_functions.py - файл, в котором определены классы различных loss-functions, на которых были попытки обучить модель
+     |-- networks.py - файл, в котором определены классы различных нейросетевых моделей, на которых были попытки обучить модель
+     |-- __init__.py - файл, определяющий, что папка modules - пакет
+  |-- parsing - каталог, посвященный парсингу исторических данных
+     |-- binance_parser.ipynb - файл для парсинга данных с бинанс
+   |-- crypto_data.ipynb - основной рабочий ноутбук
+   |-- models_portfolio.ipynb - ноутбук, в котором комбинируются предсказания различных моделей тем или иным способом, для получения лучших результатов на метриках
+
+Содержимое файла loss_functions.py:
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class MeanReturnLoss(nn.Module):
+    """
+    Custom loss function that incorporates the Sharpe ratio and a penalty for turnover.
+
+    This loss function is designed to optimize financial predictions by balancing
+    the return on investment with the costs associated with trading (turnover).
+
+    Attributes:
+        alpha (float): Weighting factor for the penalty terms.
+        epsilon (float): Small value to avoid division by zero.
+        weight_penalty_factor (float): Coefficient for weight penalty.
+        target_turnover (float): Target turnover level to aim for.
+        k (float): Coefficient for the exponential part of the turnover penalty.
+        turnover_penalty_weight (float): Weight for the polynomial part of the turnover penalty.
+    """
+
+    def __init__(self, alpha=0.5, epsilon=1e-8, weight_penalty_factor=0.0001, target_turnover=0.2, k=50.0, turnover_penalty_weight=0.1):
+        """
+        Initializes the SharpeLossPenalty.
+
+        Args:
+            alpha (float): Weighting factor for the penalty terms.
+            epsilon (float): Small value to avoid division by zero.
+            weight_penalty_factor (float): Coefficient for weight penalty.
+            target_turnover (float): Target turnover level to aim for.
+            k (float): Coefficient for the exponential part of the turnover penalty.
+            turnover_penalty_weight (float): Weight for the polynomial part of the turnover penalty.
+        """
+        super(MeanReturnLoss, self).__init__()
+        self.alpha = alpha
+        self.epsilon = epsilon  # To avoid division by zero
+        self.weight_penalty_factor = weight_penalty_factor  # Penalty factor for weight size
+        self.target_turnover = target_turnover  # Target turnover value
+        self.k = k  # Coefficient for the exponential part
+        self.turnover_penalty_weight = turnover_penalty_weight  # Weight for polynomial penalty
+
+    def turnover_penalty(self, turnover_value):
+        """
+        Calculates the penalty for deviation from the target turnover.
+
+        Args:
+            turnover_value (float): The calculated turnover value.
+
+        Returns:
+            float: The computed penalty for the given turnover value.
+        """
+        # Penalize deviation from the target_turnover value
+        penalty = (1 / (4 * turnover_value / 5) ** 2)  # Quadratic penalty
+        return penalty
+
+
+    def forward(self, predictions, targets):
+        """
+        Computes the loss based on predictions and targets.
+
+        This method normalizes the weights derived from predictions, calculates the mean
+        weighted return, and computes the turnover penalty. Finally, it returns the loss
+        as the negative mean return adjusted by the turnover penalty.
+
+        Args:
+            predictions (torch.Tensor): Predicted portfolio weights of shape (batch_size, num_assets).
+            targets (torch.Tensor): Actual returns of assets of shape (batch_size, num_assets).
+
+        Returns:
+            torch.Tensor: The computed loss value.
+        """
+        # Normalize weights
+        weights = predictions - predictions.mean()
+        weights = weights.abs().sum() + self.epsilon
+        weights = torch.where(weights != 0, predictions / weights, torch.zeros_like(predictions))
+
+        # Calculate returns
+        weighted_returns = weights * targets
+        mean_weighted_return = weighted_returns.sum(axis=1).mean()
+
+        # Calculate volatility (differentiable alternative to std())
+        # portfolio_returns = weighted_returns.sum(axis=1)
+        # volatility = torch.sqrt(((portfolio_returns - portfolio_returns.mean()) ** 2).mean() + self.epsilon)
+
+        # Check for division by zero before calculating Sharpe Ratio
+        # mean_sharpe_ratio = torch.where(volatility != 0, mean_weighted_return / volatility, torch.zeros_like(mean_weighted_return))
+
+        # Calculate turnover
+        predictions_shifted = torch.cat((predictions[1:], predictions.new_zeros((1, predictions.size(1)))), dim=0)
+        turnover_value = (predictions - predictions_shifted).abs().sum(dim=1).mean()
+        # посчитать turnover по weights
+
+        # Calculate turnover penalty
+        turnover_penalty = self.turnover_penalty(turnover_value)
+        
+        # Return loss with penalty, as well as sharpe and turnover for separate logging
+        loss = -mean_weighted_return / turnover_value  + turnover_penalty
+        return loss, (mean_weighted_return / turnover_value).item(), turnover_penalty.item()
+    
+class SharpeLoss(nn.Module):
+    """
+    Custom loss function that incorporates the Sharpe ratio and a penalty for turnover.
+
+    This loss function is designed to optimize financial predictions by balancing
+    the return on investment with the costs associated with trading (turnover).
+
+    Attributes:
+        alpha (float): Weighting factor for the penalty terms.
+        epsilon (float): Small value to avoid division by zero.
+        weight_penalty_factor (float): Coefficient for weight penalty.
+        target_turnover (float): Target turnover level to aim for.
+        k (float): Coefficient for the exponential part of the turnover penalty.
+        turnover_penalty_weight (float): Weight for the polynomial part of the turnover penalty.
+    """
+
+    def __init__(self, alpha=0.5, epsilon=1e-8, weight_penalty_factor=0.0001, target_turnover=0.2, k=50.0, turnover_penalty_weight=1):
+        """
+        Initializes the SharpeLossPenalty.
+
+        Args:
+            alpha (float): Weighting factor for the penalty terms.
+            epsilon (float): Small value to avoid division by zero.
+            weight_penalty_factor (float): Coefficient for weight penalty.
+            target_turnover (float): Target turnover level to aim for.
+            k (float): Coefficient for the exponential part of the turnover penalty.
+            turnover_penalty_weight (float): Weight for the polynomial part of the turnover penalty.
+        """
+        super(SharpeLoss, self).__init__()
+        self.alpha = alpha
+        self.epsilon = epsilon  # To avoid division by zero
+        self.weight_penalty_factor = weight_penalty_factor  # Penalty factor for weight size
+        self.target_turnover = target_turnover  # Target turnover value
+        self.k = k  # Coefficient for the exponential part
+        self.turnover_penalty_weight = turnover_penalty_weight  # Weight for polynomial penalty
+
+    def turnover_penalty(self, turnover_value):
+        """
+        Calculates the penalty for deviation from the target turnover.
+
+        This method uses both exponential and polynomial components to create a smooth
+        penalty function.
+
+        Args:
+            turnover_value (float): The calculated turnover value.
+
+        Returns:
+            float: The computed penalty for the given turnover value.
+        """
+        penalty = (1 / (turnover_value) ** 10)
+        return penalty
+
+    def forward(self, predictions, targets):
+        """
+        Computes the loss based on predictions and targets.
+
+        This method normalizes the weights derived from predictions, calculates the mean
+        weighted return, and computes the turnover penalty. Finally, it returns the loss
+        as the negative mean return adjusted by the turnover penalty.
+
+        Args:
+            predictions (torch.Tensor): Predicted portfolio weights of shape (batch_size, num_assets).
+            targets (torch.Tensor): Actual returns of assets of shape (batch_size, num_assets).
+
+        Returns:
+            torch.Tensor: The computed loss value.
+        """
+        # Normalize weights
+        weights = predictions - predictions.mean()
+        weights = weights.abs().sum() + self.epsilon
+        weights = torch.where(weights != 0, predictions / weights, torch.zeros_like(predictions))
+
+        # Calculate returns
+        weighted_returns = weights * targets
+        mean_weighted_return = weighted_returns.sum(axis=1).mean()
+
+        # Calculate volatility (differentiable alternative to std())
+        portfolio_returns = weighted_returns.sum(axis=1)
+        volatility = torch.sqrt(((portfolio_returns - portfolio_returns.mean()) ** 2).mean() + self.epsilon)
+
+        # Check for division by zero before calculating Sharpe Ratio
+        mean_sharpe_ratio = torch.where(volatility != 0, mean_weighted_return / volatility, torch.zeros_like(mean_weighted_return))
+
+        # Calculate turnover
+        predictions_shifted = torch.cat((predictions[1:], predictions.new_zeros((1, predictions.size(1)))), dim=0)
+        turnover_value = (predictions - predictions_shifted).abs().sum(dim=1).mean()
+        
+        # Calculate turnover penalty
+        turnover_penalty = self.turnover_penalty(turnover_value)
+        
+        # Return loss with penalty
+        return -(mean_weighted_return / volatility) + turnover_penalty
+
+Содержимое файла networks.py:
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+
+class LSTMModel(nn.Module):
+    """
+    LSTM model consisting of two LSTM layers followed by a fully connected layer.
+
+    Attributes:
+        lstm1: First LSTM layer.
+        lstm2: Second LSTM layer.
+        fc: Fully connected layer for output.
+        dropout: Dropout layer to prevent overfitting.
+        activation: ReLU activation function.
+    """
+    
+    def __init__(self, input_size, hidden_size, hidden_size2, output_size, dropout=0, dropout2=0):
+        """
+        Initializes the LSTMModel.
+
+        Args:
+            input_size (int): Size of the input features.
+            hidden_size (int): Size of the first LSTM hidden state.
+            hidden_size2 (int): Size of the second LSTM hidden state.
+            output_size (int): Size of the output layer.
+            dropout (float): Dropout probability for the LSTM layers.
+            dropout2 (float): Dropout probability for the output layer.
+        """
+        super(LSTMModel, self).__init__()
+        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True, dropout=dropout)
+        self.lstm2 = nn.LSTM(hidden_size, hidden_size2, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size2, output_size)
+        self.dropout = nn.Dropout(p=dropout2)
+        self.activation = nn.ReLU()
+    
+    def forward(self, x):
+        """
+        Forward pass through the model.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_size).
+
+        Returns:
+            torch.Tensor: Output tensor after LSTM processing and fully connected layer.
+        """
+        lstm_out1, _ = self.lstm1(x)
+        lstm_out2, _ = self.lstm2(lstm_out1)
+        
+        # Apply Dropout
+        lstm_out2 = self.dropout(lstm_out2)
+        
+        # Use the last time step
+        lstm_out2 = lstm_out2[:, -1, :]
+        
+        # Apply fully connected layer and activation
+        out = self.fc(lstm_out2)
+        out = self.activation(out)
+        
+        return out
+
+
+class LSTMWithAttention(nn.Module):
+    """
+    LSTM model with attention mechanism.
+
+    Attributes:
+        lstm1: First LSTM layer.
+        lstm2: Second LSTM layer.
+        attention: Multihead attention layer.
+        fc: Fully connected layer for output.
+        dropout: Dropout layer to prevent overfitting.
+        activation: ReLU activation function.
+    """
+    
+    def __init__(self, input_size, hidden_size, hidden_size2, output_size, dropout=0, dropout2=0):
+        """
+        Initializes the LSTMWithAttention model.
+
+        Args:
+            input_size (int): Size of the input features.
+            hidden_size (int): Size of the first LSTM hidden state.
+            hidden_size2 (int): Size of the second LSTM hidden state.
+            output_size (int): Size of the output layer.
+            dropout (float): Dropout probability for the LSTM layers.
+            dropout2 (float): Dropout probability for the output layer.
+        """
+        super(LSTMWithAttention, self).__init__()
+        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True, dropout=dropout)
+        self.lstm2 = nn.LSTM(hidden_size, hidden_size2, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size2, output_size)
+        self.attention = nn.MultiheadAttention(hidden_size2, num_heads=7)
+        self.dropout = nn.Dropout(p=dropout2)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        Forward pass through the model with attention.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_size).
+
+        Returns:
+            torch.Tensor: Output tensor after LSTM processing, attention, and fully connected layer.
+        """
+        lstm_out1, _ = self.lstm1(x)
+        lstm_out2, _ = self.lstm2(lstm_out1)
+        
+        # Apply Attention
+        lstm_out2, _ = self.attention(lstm_out2, lstm_out2, lstm_out2)
+        
+        lstm_out2 = self.dropout(lstm_out2)
+        lstm_out2 = lstm_out2[:, -1, :]
+        
+        out = self.fc(lstm_out2)
+        out = self.activation(out)
+        
+        return out
+
+
+class LSTMWithAttentionAlt(nn.Module):
+    """
+    Alternative LSTM model with attention mechanism and layer normalization.
+
+    Attributes:
+        lstm1: First LSTM layer.
+        lstm2: Second LSTM layer.
+        attention: Multihead attention layer.
+        fc: Fully connected layer for output.
+        dropout: Dropout layer to prevent overfitting.
+        layer_norm: Layer normalization layer.
+        activation: ReLU activation function.
+    """
+    
+    def __init__(self, input_size, hidden_size, hidden_size2, output_size, 
+                 dropout=0, dropout2=0, num_heads=7):
+        """
+        Initializes the LSTMWithAttentionAlt model.
+
+        Args:
+            input_size (int): Size of the input features.
+            hidden_size (int): Size of the first LSTM hidden state.
+            hidden_size2 (int): Size of the second LSTM hidden state.
+            output_size (int): Size of the output layer.
+            dropout (float): Dropout probability for the LSTM layers.
+            dropout2 (float): Dropout probability for the output layer.
+            num_heads (int): Number of heads in the attention layer.
+        """
+        super(LSTMWithAttentionAlt, self).__init__()
+        
+        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True, dropout=dropout)
+        self.lstm2 = nn.LSTM(hidden_size, hidden_size2, batch_first=True, dropout=dropout)
+        self.attention = nn.MultiheadAttention(hidden_size2, num_heads=num_heads, batch_first=True)
+        self.fc = nn.Linear(hidden_size2, output_size)
+        self.dropout = nn.Dropout(p=dropout2)
+        self.layer_norm = nn.LayerNorm(hidden_size2)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        Forward pass through the model with attention and layer normalization.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_size).
+
+        Returns:
+            torch.Tensor: Output tensor after LSTM processing, attention, normalization, and fully connected layer.
+        """
+        lstm_out1, _ = self.lstm1(x)
+        lstm_out2, _ = self.lstm2(lstm_out1)
+        
+        # Apply Multihead Attention
+        attn_out, _ = self.attention(lstm_out2, lstm_out2, lstm_out2)
+        
+        # Apply layer normalization
+        attn_out = self.layer_norm(attn_out)
+        
+        # Apply Dropout
+        attn_out = self.dropout(attn_out)
+        
+        # Use only the last time step
+        attn_out = attn_out[:, -1, :]
+        
+        # Forward through the fully connected layer
+        out = self.fc(attn_out)
+        out = self.activation(out)
+        
+        return out
+
+
+import torch
+import torch.nn as nn
+
+class ConvLSTMWithAttention(nn.Module):
+    """
+    Convolutional LSTM model with attention mechanism and various normalizations.
+    """
+
+    def __init__(self, input_size, hidden_size, hidden_size2, output_size, 
+                 dropout=0, dropout2=0, num_heads=3, conv_out_channels=64):
+        """
+        Initializes the ConvLSTMWithAttention model.
+
+        Args:
+            input_size (int): Size of the input features.
+            hidden_size (int): Size of the first LSTM hidden state.
+            hidden_size2 (int): Size of the second LSTM hidden state.
+            output_size (int): Size of the output layer.
+            dropout (float): Dropout probability for the LSTM layers.
+            dropout2 (float): Dropout probability for the output layer.
+            num_heads (int): Number of heads in the attention layer.
+            conv_out_channels (int): Number of output channels for the convolutional layers.
+        """
+        super(ConvLSTMWithAttention, self).__init__()
+        
+        # Convolutional layers with Batch Normalization
+        self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=conv_out_channels, kernel_size=3, padding=1)
+        self.batch_norm1 = nn.BatchNorm1d(conv_out_channels)  # Batch normalization after conv1
+        self.conv2 = nn.Conv1d(in_channels=conv_out_channels, out_channels=conv_out_channels, kernel_size=3, padding=1)
+        self.batch_norm2 = nn.BatchNorm1d(conv_out_channels)  # Batch normalization after conv2
+        self.conv_dropout = nn.Dropout(p=dropout2)
+        self.conv_activation = nn.ReLU()
+        
+        # LSTM layers
+        self.lstm1 = nn.LSTM(conv_out_channels, hidden_size, batch_first=True, dropout=dropout)
+        self.lstm_layer_norm = nn.LayerNorm(hidden_size)  # Layer normalization after lstm1
+        self.lstm2 = nn.LSTM(hidden_size, hidden_size2, batch_first=True, dropout=dropout)
+        
+        # Attention layer
+        self.attention = nn.MultiheadAttention(hidden_size2, num_heads=num_heads, batch_first=True)
+        
+        # Fully connected layer and additional layers
+        self.fc = nn.Linear(hidden_size2, output_size)
+        self.dropout = nn.Dropout(p=dropout2)
+        self.layer_norm = nn.LayerNorm(hidden_size2)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        Forward pass through the convolutional LSTM model with attention.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_size).
+
+        Returns:
+            torch.Tensor: Output tensor after convolutional, LSTM processing, attention, normalization, and fully connected layer.
+        """
+        # Apply convolutional layers
+        conv_out = x.permute(0, 2, 1)  # Change shape to (batch_size, channels, seq_len)
+        
+        conv_out = self.conv1(conv_out)
+        conv_out = self.batch_norm1(conv_out)  # Apply BatchNorm after conv1
+        conv_out = self.conv_activation(conv_out)
+        conv_out = self.conv_dropout(conv_out)
+        
+        conv_out = self.conv2(conv_out)
+        conv_out = self.batch_norm2(conv_out)  # Apply BatchNorm after conv2
+        conv_out = self.conv_activation(conv_out)
+        conv_out = self.conv_dropout(conv_out)
+        
+        # Prepare data for LSTM
+        conv_out = conv_out.permute(0, 2, 1)  # Change shape back to (batch_size, seq_len, channels)
+        
+        lstm_out1, _ = self.lstm1(conv_out)
+        lstm_out1 = self.lstm_layer_norm(lstm_out1)  # Apply LayerNorm after lstm1
+        lstm_out2, _ = self.lstm2(lstm_out1)
+        
+        # Residual connection between LSTM layers
+        lstm_out2 = lstm_out1 + lstm_out2  # Residual connection
+        
+        # Apply Multihead Attention
+        attn_out, _ = self.attention(lstm_out2, lstm_out2, lstm_out2)
+        
+        # Apply layer normalization
+        attn_out = self.layer_norm(attn_out)
+        
+        # Apply Dropout
+        attn_out = self.dropout(attn_out)
+        
+        # Use only the last time step
+        attn_out = attn_out[:, -1, :]
+        
+        # Forward through the fully connected layer
+        out = self.fc(attn_out)
+        
+        return out
