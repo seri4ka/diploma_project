@@ -1,3 +1,5 @@
 # Игнорирование папки data и всех её файлов
 /data/
 /modules/__pycache__/
+
+*.pyc

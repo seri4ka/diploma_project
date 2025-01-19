@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import torch
+
 from typing import List, Tuple, Union
 
 
@@ -170,3 +172,82 @@ def generate_windows(
     x = np.lib.stride_tricks.sliding_window_view(training_data, (window_size, training_data.shape[1]))[:, 0]
     y = data[target_columns].iloc[window_size - 1:].values
     return x, y
+
+def prepare_test_data(
+        all_x: np.ndarray,
+        all_y: np.ndarray,
+        test_size: int = 850
+    ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Формирует тестовую выборку.
+    
+    :param all_x: Все данные (матрица признаков).
+    :param all_y: Все целевые значения.
+    :param test_size: Размер тестовой выборки.
+    :return: Тестовые данные x и y.
+    """
+    x_test = all_x[-test_size:].reshape(-1, all_x.shape[1])
+    y_test = all_y[-test_size:].reshape(-1)
+    return x_test, y_test
+
+
+def prepare_train_data(
+        all_x: np.ndarray,
+        all_y: np.ndarray,
+        val_len: int = 1000,
+        offset: int = 110
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Формирует тренировочную и валидационную выборки.
+    
+    :param all_x: Все данные (матрица признаков).
+    :param all_y: Все целевые значения.
+    :param val_len: Размер валидационной выборки.
+    :param offset: Смещение для тестовой выборки.
+    :return: Тренировочные данные x и y, валидационные данные x и y.
+    """
+    # Определяем индексы для валидационной выборки
+    val_start = all_x.shape[0] // 2 - val_len // 2
+    val_end = val_start + val_len
+
+    x_val = all_x[val_start:val_end].reshape(-1, all_x.shape[1])
+    y_val = all_y[val_start:val_end].reshape(-1)
+
+    # Определяем отступы для тестовой выборки
+    test_start = max(0, val_start - offset)
+    test_end = min(all_x.shape[0], val_end + offset)
+
+    x_train = np.concatenate((all_x[:test_start], all_x[test_end:]), axis=0)
+    y_train = np.concatenate((all_y[:test_start], all_y[test_end:]), axis=0)
+
+    return x_train, y_train, x_val, y_val
+
+
+def handle_infs_and_nans(
+        data: np.ndarray
+    ) -> np.ndarray:
+    """
+    Обрабатывает NaN и бесконечности в данных, заменяя их на средние значения по колонкам.
+    
+    :param data: Исходные данные.
+    :return: Данные с заменёнными NaN и бесконечностями.
+    """
+    data = np.where(np.isinf(data), np.nan, data)
+    data = np.where(np.isnan(data), np.nanmean(data, axis=0), data)
+    return data
+
+
+def convert_to_tensor(
+        x: np.ndarray,
+        y: np.ndarray
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Преобразует данные в тензоры PyTorch.
+
+    :param x: Признаки.
+    :param y: Целевые значения.
+    :return: Признаки и целевые значения в виде тензоров.
+    """
+    x_tensor = torch.Tensor(x)
+    y_tensor = torch.tensor(y, dtype=torch.float32)
+    return x_tensor, y_tensor
